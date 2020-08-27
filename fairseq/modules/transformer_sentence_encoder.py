@@ -3,10 +3,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 import torch
 import torch.nn as nn
+
 from fairseq.modules import (
     FairseqDropout,
     LayerDropModuleList,
@@ -97,6 +98,8 @@ class TransformerSentenceEncoder(nn.Module):
         traceable: bool = False,
         q_noise: float = 0.0,
         qn_block_size: int = 8,
+        use_token_shapes_embedding: bool = False,
+        shapes_size: int = None
     ) -> None:
 
         super().__init__()
@@ -112,9 +115,12 @@ class TransformerSentenceEncoder(nn.Module):
         self.learned_pos_embedding = learned_pos_embedding
         self.traceable = traceable
         self.tpu = False  # whether we're on TPU
+        self.use_token_shapes_embedding = use_token_shapes_embedding
+        self.shapes_size = shapes_size
 
         self.embed_tokens = self.build_embedding(
-            self.vocab_size, self.embedding_dim, self.padding_idx
+            self.vocab_size, self.embedding_dim, self.padding_idx,
+            self.use_token_shapes_embedding, self.shapes_size
         )
         self.embed_scale = embed_scale
 
@@ -187,8 +193,11 @@ class TransformerSentenceEncoder(nn.Module):
         for layer in range(n_trans_layers_to_freeze):
             freeze_module_params(self.layers[layer])
 
-    def build_embedding(self, vocab_size, embedding_dim, padding_idx):
-        return nn.Embedding(vocab_size, embedding_dim, padding_idx)
+    def build_embedding(self, vocab_size, embedding_dim, padding_idx, use_token_shapes_embedding, shapes_size):
+        if use_token_shapes_embedding:
+            return TokenShapesEmbedder(vocab_size, shapes_size, embedding_dim, padding_idx)
+        else:
+            return nn.Embedding(vocab_size, embedding_dim, padding_idx)
 
     def build_transformer_sentence_encoder_layer(
         self,
@@ -276,3 +285,21 @@ class TransformerSentenceEncoder(nn.Module):
             return torch.stack(inner_states), sentence_rep
         else:
             return inner_states, sentence_rep
+
+
+class TokenShapesEmbedder(nn.Module):
+
+    def __init__(self, vocab_size: int, shapes_size: int, embedding_dim: int, padding_idx: int) -> None:
+        super().__init__()
+        self.embed_tokens = nn.Embedding(vocab_size, embedding_dim, padding_idx)
+        self.embed_shapes = nn.Embedding(shapes_size, embedding_dim, 0)
+        self.weight = self.embed_tokens.weight
+
+    def forward(self, x: torch.Tensor):
+        bit_mask = torch.full(size=x.shape, requires_grad=False, dtype=x.dtype, fill_value=65535, device=x.device)
+        tokens = x & bit_mask
+        shapes = x.bitwise_xor(tokens) >> 16
+        token_emb = self.embed_tokens(tokens)
+        shape_emb = self.embed_shapes(shapes)
+        return token_emb + shape_emb
+

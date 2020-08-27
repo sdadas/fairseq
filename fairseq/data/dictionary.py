@@ -2,7 +2,7 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+import json
 import os
 from collections import Counter
 from multiprocessing import Pool
@@ -386,3 +386,193 @@ class TruncatedDictionary(object):
         if i < self.length:
             return self.wrapped_dict[i]
         return self.wrapped_dict.unk()
+
+
+class TokenShapesDictionary(Dictionary):
+
+    def __init__(self, *, bos="<s>", pad="<pad>", eos="</s>", unk="<unk>", extra_special_symbols=None):
+        self.shapes = ["<pad>", "<unk>"]
+        self.shape_indices = {"<pad>": 0, "<unk>": 1}
+        self.special_symbols = {bos, pad, eos, unk}
+        if extra_special_symbols:
+            for s in extra_special_symbols:
+                self.special_symbols.add(s)
+        super().__init__(bos=bos, pad=pad, eos=eos, unk=unk, extra_special_symbols=extra_special_symbols)
+
+    def update(self, new_dict):
+        """Updates counts from new dictionary."""
+        for word in new_dict.symbols:
+            lower = word.lower()
+            idx2 = new_dict.indices[word]
+            if lower in self.indices:
+                idx = self.indices[lower]
+                self.count[idx] = self.count[idx] + new_dict.count[idx2]
+            else:
+                idx = len(self.symbols)
+                self.indices[lower] = idx
+                self.symbols.append(lower)
+                self.count.append(new_dict.count[idx2])
+            self.add_shape(word)
+
+    def add_symbol(self, word, n=1, overwrite=False):
+        lower = word.lower()
+        if lower in self.indices and not overwrite:
+            idx = self.indices[lower]
+            self.count[idx] = self.count[idx] + n
+        else:
+            idx = len(self.symbols)
+            self.indices[lower] = idx
+            self.symbols.append(lower)
+            self.count.append(n)
+        self.add_shape(word)
+        return idx
+
+    def add_shape(self, word: str):
+        shape = self.to_shape(word)
+        if shape not in self.shape_indices:
+            shape_idx = len(self.shapes)
+            self.shapes.append(shape)
+            self.shape_indices[shape] = shape_idx
+            return shape_idx
+        else:
+            return self.shape_indices[shape]
+
+    def to_shape(self, word: str) -> str:
+        shape = []
+        for char in word:
+            if char.isnumeric():
+                shape.append("0")
+            elif char.isalpha():
+                if char.isupper():
+                    shape.append("A")
+                else:
+                    shape.append("a")
+            else:
+                shape.append("_")
+        return "".join(shape)
+
+    def shape_index(self, shape):
+        """Returns the index of the specified symbol"""
+        assert isinstance(shape, str)
+        if shape in self.shape_indices:
+            return self.shape_indices[shape]
+        return 1
+
+    def finalize(self, threshold=-1, nwords=-1, padding_factor=8):
+        super().finalize(threshold, nwords, padding_factor)
+        self.pad_shapes_to_multiple_(padding_factor)
+
+    def pad_shapes_to_multiple_(self, padding_factor):
+        if padding_factor > 1:
+            i = 0
+            while len(self.shapes) % padding_factor != 0:
+                symbol = "madeupword{:04d}".format(i)
+                shape_idx = len(self.shapes)
+                self.shapes.append(symbol)
+                self.shape_indices[symbol] = shape_idx
+                i += 1
+
+    def encode_line(
+        self,
+        line,
+        line_tokenizer=tokenize_line,
+        add_if_not_exist=True,
+        consumer=None,
+        append_eos=True,
+        reverse_order=False,
+    ):
+        words = [word.lower() for word in line_tokenizer(line)]
+        if reverse_order:
+            words = list(reversed(words))
+        nwords = len(words)
+        ids = torch.IntTensor(nwords + 1 if append_eos else nwords)
+
+        for i, word in enumerate(words):
+            if add_if_not_exist:
+                idx = self.add_symbol(word)
+                self.add_shape(word)
+            else:
+                idx = self.index(word)
+            encoded = self.encode_word(word, idx)
+            if consumer is not None:
+                consumer(word, encoded)
+            ids[i] = encoded
+        if append_eos:
+            ids[nwords] = self.encode_word(self.symbols[self.eos_index], self.eos_index)
+        return ids
+
+    def encode_word(self, word, word_idx) -> int:
+        shape = self.to_shape(word)
+        shape_idx = self.shape_index(shape)
+        if word in self.special_symbols:
+            shape_idx = self.shape_indices.get("<unk>")
+        shape_idx = shape_idx << 16
+        return word_idx + shape_idx
+
+
+    def save(self, f):
+        if isinstance(f, str):
+            PathManager.mkdirs(os.path.dirname(f))
+            with PathManager.open(f, "w", encoding="utf-8") as fd:
+                return self.save(fd)
+        result = {
+            "symbols": self.symbols[self.nspecial :],
+            "counts": self.count[self.nspecial :],
+            "shapes": self.shapes[2:]
+        }
+        json.dump(result, f, indent=2)
+
+    @classmethod
+    def load(cls, f):
+        """Loads the dictionary from a text file with the format:
+
+        ```
+        <symbol0> <count0>
+        <symbol1> <count1>
+        ...
+        ```
+        """
+        d = cls()
+        d.add_from_file(f)
+        return d
+
+    def add_from_file(self, f):
+        """
+        Loads a pre-existing dictionary from a text file and adds its symbols
+        to this instance.
+        """
+        if isinstance(f, str):
+            try:
+                with PathManager.open(f, "r", encoding="utf-8") as fd:
+                    self.add_from_file(fd)
+            except FileNotFoundError as fnfe:
+                raise fnfe
+            except UnicodeError:
+                raise Exception(
+                    "Incorrect encoding detected in {}, please "
+                    "rebuild the dataset".format(f)
+                )
+            return
+
+        values = json.load(f)
+        shapes = values["shapes"]
+        shape_idx = len(self.shapes)
+        for shape in shapes:
+            self.shapes.append(shape)
+            self.shape_indices[shape] = shape_idx
+            shape_idx += 1
+
+        symbols = values["symbols"]
+        counts = values["counts"]
+        for symbol, count in zip(symbols, counts):
+            self.add_symbol(symbol, n=count, overwrite=False)
+
+    def shapes_size(self):
+        return len(self.shapes)
+
+    def dummy_sentence(self, length):
+        raise NotImplementedError
+
+    def string(self, tensor, bpe_symbol=None, escape_unk=False, extra_symbols_to_ignore=None, unk_string=None):
+        raise NotImplementedError
+

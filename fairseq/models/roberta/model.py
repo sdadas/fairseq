@@ -27,7 +27,7 @@ from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 
 from .hub_interface import RobertaHubInterface
-
+from ...data.dictionary import TokenShapesDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +307,8 @@ class RobertaEncoder(FairseqEncoder):
             activation_fn=args.activation_fn,
             q_noise=args.quant_noise_pq,
             qn_block_size=args.quant_noise_pq_block_size,
+            use_token_shapes_embedding=isinstance(dictionary, TokenShapesDictionary),
+            shapes_size=dictionary.shapes_size() if isinstance(dictionary, TokenShapesDictionary) else None
         )
         args.untie_weights_roberta = getattr(args, 'untie_weights_roberta', False)
 
