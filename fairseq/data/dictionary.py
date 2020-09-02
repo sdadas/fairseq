@@ -439,16 +439,23 @@ class TokenShapesDictionary(Dictionary):
 
     def to_shape(self, word: str) -> str:
         shape = []
+        prev = " "
         for char in word:
             if char.isnumeric():
-                shape.append("0")
+                curr = "0"
             elif char.isalpha():
                 if char.isupper():
-                    shape.append("A")
+                    curr = "A"
                 else:
-                    shape.append("a")
+                    curr = "a"
             else:
-                shape.append("_")
+                curr = "_"
+            if prev == curr:
+                if shape[-1] != "+":
+                    shape.append("+")
+            else:
+                shape.append(curr)
+            prev = curr
         return "".join(shape)
 
     def shape_index(self, shape):
