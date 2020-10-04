@@ -563,6 +563,7 @@ class TokenShapesDictionary(Dictionary):
 
         values = json.load(f)
         shapes = values["shapes"]
+        self.shapes = self.shapes[:2]
         shape_idx = len(self.shapes)
         for shape in shapes:
             self.shapes.append(shape)
