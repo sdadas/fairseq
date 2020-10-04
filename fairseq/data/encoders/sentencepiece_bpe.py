@@ -3,11 +3,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 import unicodedata
-from typing import Callable, List, Dict
 
 from fairseq import file_utils
 from fairseq.data.encoders import register_bpe
-from sentencepiece import SentencePieceProcessor
 
 
 @register_bpe('sentencepiece')
